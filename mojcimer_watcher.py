@@ -2,7 +2,6 @@ import os, json, time
 import requests
 from bs4 import BeautifulSoup
 
-# --- Scraper config ---
 BASE = "https://www.mojcimer.si"
 LIST_URL = BASE + "/seznam-prostih-sob/?page={}"
 PAGES_TO_SCAN = [1, 2, 3]
@@ -14,7 +13,6 @@ USER_AGENT = "Mozilla/5.0 (compatible; MojCimerWatcher/1.0)"
 session = requests.Session()
 session.headers.update({"User-Agent": USER_AGENT})
 
-# --- Telegram env ---
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -42,7 +40,6 @@ def extract_listings():
             href = a.get("href") or ""
             if "/seznam-prostih-sob/" not in href:
                 continue
-            # skip non-detail links with query strings
             if "?" in href and not href.rstrip("/").split("/")[-1].isdigit():
                 continue
             link = href if href.startswith("http") else (BASE + href)
@@ -83,8 +80,18 @@ def notify(item):
 
 def main():
     seen = load_seen()
-    listings = extract_listings()
-    new = [it for it in listings if it["url"] not in seen and filter_koper(it)]
+    listings = [it for it in extract_listings() if filter_koper(it)]
+
+    # FIRST RUN: prime instead of spamming
+    if not seen:
+        for it in listings:
+            seen.add(it["url"])
+        save_seen(seen)
+        send_telegram("✅ Bot primed: marked current Koper listings as seen. I’ll only alert you about NEW ones from now on.")
+        return
+
+    # Normal runs: only send unseen
+    new = [it for it in listings if it["url"] not in seen]
     for it in new:
         try:
             notify(it)
