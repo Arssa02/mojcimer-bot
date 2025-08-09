@@ -2,6 +2,7 @@ import os, json, time
 import requests
 from bs4 import BeautifulSoup
 
+# --- Scraper config ---
 BASE = "https://www.mojcimer.si"
 LIST_URL = BASE + "/seznam-prostih-sob/?page={}"
 PAGES_TO_SCAN = [1, 2, 3]
@@ -12,6 +13,10 @@ USER_AGENT = "Mozilla/5.0 (compatible; MojCimerWatcher/1.0)"
 
 session = requests.Session()
 session.headers.update({"User-Agent": USER_AGENT})
+
+# --- Telegram env ---
+TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 def load_seen():
     if os.path.exists(SEEN_FILE):
@@ -37,6 +42,7 @@ def extract_listings():
             href = a.get("href") or ""
             if "/seznam-prostih-sob/" not in href:
                 continue
+            # skip non-detail links with query strings
             if "?" in href and not href.rstrip("/").split("/")[-1].isdigit():
                 continue
             link = href if href.startswith("http") else (BASE + href)
@@ -62,62 +68,23 @@ def filter_koper(item):
     except Exception:
         return False
 
-def send_whatsapp_text(body):
-    phone_id = os.environ["WHATSAPP_PHONE_ID"]
-    token = os.environ["WHATSAPP_TOKEN"]
-    to = os.environ["WHATSAPP_TO"]
-    endpoint = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"messaging_product": "whatsapp","to": to,"type": "text","text": {"body": body}}
-    r = session.post(endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+def send_telegram(text):
+    if not (TG_TOKEN and TG_CHAT):
+        raise SystemExit("Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID.")
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    payload = {"chat_id": TG_CHAT, "text": text, "disable_web_page_preview": True}
+    r = session.post(url, json=payload, timeout=REQUEST_TIMEOUT)
     if r.status_code >= 300:
-        raise RuntimeError(f"WhatsApp text failed: {r.status_code} {r.text}")
-
-def send_whatsapp_template(url, snippet):
-    phone_id = os.environ["WHATSAPP_PHONE_ID"]
-    token = os.environ["WHATSAPP_TOKEN"]
-    to = os.environ["WHATSAPP_TO"]
-    tmpl = os.getenv("WHATSAPP_TEMPLATE_NAME", "").strip()
-    lang = os.getenv("WHATSAPP_TEMPLATE_LANG", "en_US").strip() or "en_US"
-    endpoint = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "template",
-        "template": {
-            "name": tmpl,
-            "language": {"code": lang},
-            "components": [{
-                "type": "body",
-                "parameters": [
-                    {"type": "text", "text": url},
-                    {"type": "text", "text": snippet or ""}
-                ]
-            }]
-        }
-    }
-    r = session.post(endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
-    if r.status_code >= 300:
-        raise RuntimeError(f"WhatsApp template failed: {r.status_code} {r.text}")
+        raise RuntimeError(f"Telegram send failed: {r.status_code} {r.text}")
 
 def notify(item):
     msg = f"🆕 Novo stanovanje (Koper) na MojCimer:\n{item['url']}\n\n{item.get('snippet','')}"
-    if os.getenv("WHATSAPP_TEMPLATE_NAME"):
-        send_whatsapp_template(item["url"], item.get("snippet",""))
-    else:
-        send_whatsapp_text(msg)
+    send_telegram(msg)
 
 def main():
-    required = ["WHATSAPP_TOKEN","WHATSAPP_PHONE_ID","WHATSAPP_TO"]
-    missing = [k for k in required if not os.getenv(k)]
-    if missing:
-        raise SystemExit(f"Missing secrets: {', '.join(missing)}")
-
     seen = load_seen()
     listings = extract_listings()
     new = [it for it in listings if it["url"] not in seen and filter_koper(it)]
-
     for it in new:
         try:
             notify(it)
