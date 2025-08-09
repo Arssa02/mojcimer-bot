@@ -1,25 +1,14 @@
-import os, json, time, re
+import os, json, time
 import requests
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 
-# ---------- CONFIG ----------
 BASE = "https://www.mojcimer.si"
-LIST_URL = BASE + "/seznam-prostih-sob/?page={}"   # pages 1..N
-PAGES_TO_SCAN = [1, 2, 3]                          # scan first 3 pages
+LIST_URL = BASE + "/seznam-prostih-sob/?page={}"
+PAGES_TO_SCAN = [1, 2, 3]
 SEEN_FILE = "seen.json"
-CITY_KEYWORDS = ("koper", "capodistria")           # match either, case-insensitive
+CITY_KEYWORDS = ("koper", "capodistria")
 REQUEST_TIMEOUT = 20
-POLITE_DELAY_SECONDS = 1                            # between messages
 USER_AGENT = "Mozilla/5.0 (compatible; MojCimerWatcher/1.0)"
-
-# WhatsApp env
-load_dotenv()
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID", "")
-WHATSAPP_TO = os.getenv("WHATSAPP_TO", "")
-WHATSAPP_TEMPLATE_NAME = os.getenv("WHATSAPP_TEMPLATE_NAME", "").strip()
-WHATSAPP_TEMPLATE_LANG = os.getenv("WHATSAPP_TEMPLATE_LANG", "en_US").strip() or "en_US"
 
 session = requests.Session()
 session.headers.update({"User-Agent": USER_AGENT})
@@ -40,29 +29,22 @@ def page_html(url):
     return r.text
 
 def extract_listings():
-    """Scrape listing links + nearby text from listing pages."""
     items = {}
     for p in PAGES_TO_SCAN:
         html = page_html(LIST_URL.format(p))
         soup = BeautifulSoup(html, "html.parser")
-
-        # Grab anchors that lead to detail pages under /seznam-prostih-sob/...
         for a in soup.select('a[href*="/seznam-prostih-sob/"]'):
             href = a.get("href") or ""
             if "/seznam-prostih-sob/" not in href:
                 continue
-            # Avoid paging/filter links that include '?' without an ID path
             if "?" in href and not href.rstrip("/").split("/")[-1].isdigit():
                 continue
             link = href if href.startswith("http") else (BASE + href)
-
-            # make a short text snippet from closest container
             container = a.find_parent()
             raw_text = container.get_text(" ", strip=True) if container else a.get_text(" ", strip=True)
             snippet = " ".join(raw_text.split())
             if len(snippet) > 250:
                 snippet = snippet[:247] + "..."
-
             items[link] = {"url": link, "snippet": snippet}
     return list(items.values())
 
@@ -71,50 +53,48 @@ def looks_like_koper(text):
     return any(k in t for k in CITY_KEYWORDS)
 
 def filter_koper(item):
-    """Return True if listing is in Koper (quick check + fallback to detail page)."""
     if looks_like_koper(item.get("snippet", "")):
         return True
-    # Fallback: fetch detail page and search anywhere in text
     try:
         detail_html = page_html(item["url"])
-        # Strip tags and search for keywords in plain text
         txt = BeautifulSoup(detail_html, "html.parser").get_text(" ", strip=True).lower()
         return any(k in txt for k in CITY_KEYWORDS)
     except Exception:
         return False
 
 def send_whatsapp_text(body):
-    endpoint = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages"
-    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": WHATSAPP_TO,
-        "type": "text",
-        "text": {"body": body}
-    }
+    phone_id = os.environ["WHATSAPP_PHONE_ID"]
+    token = os.environ["WHATSAPP_TOKEN"]
+    to = os.environ["WHATSAPP_TO"]
+    endpoint = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"messaging_product": "whatsapp","to": to,"type": "text","text": {"body": body}}
     r = session.post(endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
     if r.status_code >= 300:
         raise RuntimeError(f"WhatsApp text failed: {r.status_code} {r.text}")
 
 def send_whatsapp_template(url, snippet):
-    endpoint = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_ID}/messages"
-    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    phone_id = os.environ["WHATSAPP_PHONE_ID"]
+    token = os.environ["WHATSAPP_TOKEN"]
+    to = os.environ["WHATSAPP_TO"]
+    tmpl = os.getenv("WHATSAPP_TEMPLATE_NAME", "").strip()
+    lang = os.getenv("WHATSAPP_TEMPLATE_LANG", "en_US").strip() or "en_US"
+    endpoint = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {
         "messaging_product": "whatsapp",
-        "to": WHATSAPP_TO,
+        "to": to,
         "type": "template",
         "template": {
-            "name": WHATSAPP_TEMPLATE_NAME,
-            "language": {"code": WHATSAPP_TEMPLATE_LANG},
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": url},
-                        {"type": "text", "text": snippet or ""}
-                    ]
-                }
-            ]
+            "name": tmpl,
+            "language": {"code": lang},
+            "components": [{
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": url},
+                    {"type": "text", "text": snippet or ""}
+                ]
+            }]
         }
     }
     r = session.post(endpoint, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
@@ -123,30 +103,29 @@ def send_whatsapp_template(url, snippet):
 
 def notify(item):
     msg = f"🆕 Novo stanovanje (Koper) na MojCimer:\n{item['url']}\n\n{item.get('snippet','')}"
-    if WHATSAPP_TEMPLATE_NAME:
-        send_whatsapp_template(item["url"], item.get("snippet", ""))
+    if os.getenv("WHATSAPP_TEMPLATE_NAME"):
+        send_whatsapp_template(item["url"], item.get("snippet",""))
     else:
-        # Works only if you recently chatted with the business (24h window).
         send_whatsapp_text(msg)
 
 def main():
-    if not (WHATSAPP_TOKEN and WHATSAPP_PHONE_ID and WHATSAPP_TO):
-        raise SystemExit("Missing WhatsApp .env values. Fill WHATSAPP_TOKEN/WHATSAPP_PHONE_ID/WHATSAPP_TO.")
+    required = ["WHATSAPP_TOKEN","WHATSAPP_PHONE_ID","WHATSAPP_TO"]
+    missing = [k for k in required if not os.getenv(k)]
+    if missing:
+        raise SystemExit(f"Missing secrets: {', '.join(missing)}")
 
     seen = load_seen()
     listings = extract_listings()
-    # Only new + Koper
     new = [it for it in listings if it["url"] not in seen and filter_koper(it)]
 
     for it in new:
         try:
             notify(it)
-            time.sleep(POLITE_DELAY_SECONDS)
+            time.sleep(1)
         except Exception as e:
             print("Send failed:", e)
         finally:
             seen.add(it["url"])
-
     save_seen(seen)
 
 if __name__ == "__main__":
